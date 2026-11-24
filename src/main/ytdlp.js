@@ -9,6 +9,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { app, net } = require('electron');
 const auth = require('./auth');
+const { log } = require('./log');
 
 const RELEASE_BASE = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/';
 const PROGRESS_PREFIX = '@@P|';
@@ -79,7 +80,13 @@ async function ensureEngine(onProgress = () => {}) {
     return target;
   }
 
-  const res = await net.fetch(RELEASE_BASE + assetName());
+  await downloadFile(RELEASE_BASE + assetName(), target, onProgress);
+  return target;
+}
+
+// Downloads `url` next to `target` and only replaces `target` once complete.
+async function downloadFile(url, target, onProgress = () => {}) {
+  const res = await net.fetch(url);
   if (!res.ok) throw new Error(`Não foi possível baixar o motor de download (HTTP ${res.status}). Verifique sua conexão.`);
   const total = Number(res.headers.get('content-length')) || 0;
   const tmp = target + '.download';
@@ -101,9 +108,15 @@ async function ensureEngine(onProgress = () => {}) {
     fs.rmSync(tmp, { force: true });
     throw new Error('O download do motor foi interrompido. Tente de novo.');
   }
+  if (fs.existsSync(target)) {
+    // A running executable can be renamed on Windows but not overwritten
+    const old = target + '.old';
+    fs.rmSync(old, { force: true });
+    fs.renameSync(target, old);
+    try { fs.rmSync(old, { force: true }); } catch { /* still in use; removed next time */ }
+  }
   fs.renameSync(tmp, target);
   if (process.platform !== 'win32') fs.chmodSync(target, 0o755);
-  return target;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,8 +133,9 @@ function baseArgs(settings) {
   return args;
 }
 
-function spawnEngine(args, settings) {
-  return spawn(binPath(), [...baseArgs(settings), ...args], {
+function spawnEngine(args, settings, { bare = false } = {}) {
+  const base = bare ? ['--ignore-config', '--no-colors', '--encoding', 'utf-8'] : baseArgs(settings);
+  return spawn(binPath(), [...base, ...args], {
     windowsHide: true,
     detached: process.platform !== 'win32',
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }
@@ -153,10 +167,10 @@ function lineReader(stream, onLine) {
   stream.on('end', () => { if (buf) onLine(buf); });
 }
 
-function run(args, settings, { timeout = 120000 } = {}) {
+function run(args, settings, { timeout = 120000, bare = false } = {}) {
   return new Promise((resolve, reject) => {
     let child;
-    try { child = spawnEngine(args, settings); } catch (err) { reject(err); return; }
+    try { child = spawnEngine(args, settings, { bare }); } catch (err) { reject(err); return; }
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => { killTree(child); reject(new Error('O site demorou demais para responder. Tente de novo.')); }, timeout);
@@ -170,7 +184,9 @@ function run(args, settings, { timeout = 120000 } = {}) {
       if (code === 0) resolve({ stdout, stderr });
       else {
         const err = new Error(friendlyError(stderr || stdout));
-        err.raw = stderr;
+        err.raw = stderr || stdout;
+        log('engine', `yt-dlp terminou com código ${code}: ${args.filter(a => !String(a).startsWith('http')).join(' ')}`,
+          (stderr || stdout).split(/\r?\n/).filter(Boolean).slice(-15).join('\n'));
         err.needsLogin = needsLogin(stderr || stdout);
         reject(err);
       }
@@ -345,16 +361,94 @@ async function analyze(url, settings) {
 
 async function version(settings) {
   if (!isInstalled()) return null;
-  try { return (await run(['--version'], settings, { timeout: 30000 })).stdout.trim(); } catch { return null; }
+  try { return (await run(['--version'], settings, { timeout: 30000, bare: true })).stdout.trim(); } catch { return null; }
+}
+
+// Messages for update failures (the download error rules don't fit here).
+function updateError(text) {
+  const t = String(text || '');
+  if (/rate limit|HTTP Error (403|429)/i.test(t)) return 'O GitHub limitou as consultas de atualização. Tente de novo em alguns minutos.';
+  if (/Insufficient permissions|Permission denied|Access is denied|Unable to (move|overwrite|remove|write)/i.test(t)) {
+    return 'Sem permissão para substituir o motor. Feche o Vela e abra de novo; se continuar, apague a pasta "bin" dentro de %APPDATA%\\Vela e o Vela baixa a versão mais recente.';
+  }
+  if (/Unable to obtain version info|getaddrinfo|timed out|Connection|SSL|certificate|urlopen|Network|ERR_/i.test(t)) {
+    return 'Não foi possível consultar a versão mais recente. Verifique sua internet e tente de novo.';
+  }
+  const last = t.split(/\r?\n/).filter(l => /^ERROR:/.test(l)).pop();
+  return 'Não foi possível atualizar o motor' + (last ? ': ' + last.replace(/^ERROR:\s*/, '') : '.');
+}
+
+// github.com/<repo>/releases/latest redirects to /releases/tag/<version>.
+// net.fetch hides redirect targets, so use net.request and stop at the first one.
+function latestReleaseUrl() {
+  return new Promise((resolve, reject) => {
+    const req = net.request({ url: 'https://github.com/yt-dlp/yt-dlp/releases/latest', method: 'HEAD', redirect: 'manual' });
+    const timer = setTimeout(() => { req.abort(); reject(new Error('timed out')); }, 20000);
+    req.on('redirect', (_status, _method, redirectUrl) => {
+      clearTimeout(timer);
+      req.abort();
+      resolve(redirectUrl);
+    });
+    req.on('response', res => {
+      clearTimeout(timer);
+      res.on('data', () => {});
+      const loc = res.headers.location;
+      resolve(Array.isArray(loc) ? loc[0] : (loc || ''));
+    });
+    req.on('error', err => { clearTimeout(timer); reject(err); });
+    req.end();
+  });
+}
+
+// Plan B when `yt-dlp -U` fails: find the latest version from the release
+// page redirect (no GitHub API, so no rate limit) and replace the binary.
+async function updateByDownload(current) {
+  const where = await latestReleaseUrl();
+  const m = where.match(/\/releases\/tag\/([^/?#]+)/);
+  if (!m) throw new Error(`unexpected release page answer (${where || 'no redirect'})`);
+  const latest = decodeURIComponent(m[1]);
+  if (current && latest === current) return { updated: false, version: current };
+  await downloadFile(`https://github.com/yt-dlp/yt-dlp/releases/download/${latest}/${assetName()}`, binPath());
+  return { updated: true, version: latest };
 }
 
 async function update(settings) {
   if (process.env.VELA_YTDLP) return { updated: false, message: 'Atualização desativada no modo de desenvolvimento.' };
-  const { stdout, stderr } = await run(['-U'], settings, { timeout: 180000 });
-  const out = stdout + stderr;
-  const m = out.match(/Updated yt-dlp to\s+\S*?@?([\d.]+)/i);
-  if (m) return { updated: true, message: `Motor atualizado para a versão ${m[1]}.` };
-  return { updated: false, message: 'O motor de download já está na versão mais recente.' };
+  const before = await version(settings);
+  log('update', `Verificando atualização (versão atual: ${before || 'desconhecida'})`);
+  let out = '';
+  let failure = null;
+  try {
+    const r = await run(['-U'], settings, { timeout: 180000, bare: true });
+    out = r.stdout + r.stderr;
+    log('update', 'Saída do yt-dlp -U', out.trim());
+  } catch (err) {
+    failure = err.raw || err.message;
+    log('update', 'yt-dlp -U falhou', failure);
+  }
+
+  if (!failure) {
+    const m = out.match(/Updated yt-dlp to\s+\S*?@?([\d.]+)/i);
+    if (m) return { updated: true, message: `Motor atualizado para a versão ${m[1]}.` };
+    if (/is up to date/i.test(out)) {
+      return { updated: false, message: `O motor já está na versão mais recente${before ? ` (${before})` : ''}.` };
+    }
+    failure = out;
+  }
+
+  // Permission problems won't be fixed by downloading again
+  if (/Insufficient permissions|Permission denied|Access is denied/i.test(failure)) throw new Error(updateError(failure));
+  try {
+    const r = await updateByDownload(before);
+    log('update', r.updated ? `Atualizado por download para ${r.version}` : `Já na versão mais recente (${r.version})`);
+    const now = (await version(settings)) || r.version;
+    return r.updated
+      ? { updated: true, message: `Motor atualizado para a versão ${now}.` }
+      : { updated: false, message: `O motor já está na versão mais recente (${now}).` };
+  } catch (err) {
+    log('update', 'Atualização por download falhou', err.stack || err.message);
+    throw new Error(updateError(failure));
+  }
 }
 
 async function listExtractors(settings) {

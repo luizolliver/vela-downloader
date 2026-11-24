@@ -277,9 +277,9 @@
   $('#loginCancel').addEventListener('click', () => api.auth.cancel());
   $('#loginFinish').addEventListener('click', () => api.auth.finish());
   api.auth.onPhase(phase => {
-    if (phase !== 'reading') return;
-    // The browser closed; Vela is reading the saved login
-    $('#loginWaitTxt').textContent = 'Lendo o login salvo…';
+    const text = { closing: 'Fechando o navegador…', reading: 'Lendo o login salvo…' }[phase];
+    if (!text) return;
+    $('#loginWaitTxt').textContent = text;
     $('#loginActions').hidden = true;
   });
   async function signIn(siteId) {
@@ -304,7 +304,7 @@
     if (r.status) S.auth = r.status;
     S.settings = await api.settings.set({});
     if (S.view === 'settings') renderSettings();
-    if (!r.ok) { toast(r.error, { error: true, duration: 8000 }); return false; }
+    if (!r.ok) { toast(r.error, { error: true, duration: 10000 }); return false; }
     if (!r.connected) { if (!r.canceled) toast('O login não foi concluído. Tente de novo quando quiser.'); return false; }
     toast(`Conectado ao ${siteName(siteId)}`);
     return true;
@@ -1095,6 +1095,7 @@
     renderSettings();
   });
   $$('[data-ext]').forEach(b => b.addEventListener('click', () => api.openExternal(b.dataset.ext)));
+  $('#setOpenLog').addEventListener('click', () => api.openLog());
 
   // Theme changes from the OS or from settings re-measure segmented controls
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', syncSegs);

@@ -10,11 +10,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/luizolliver/youtube-dl/releases/latest"><b>Baixar para Windows</b></a>
+  <a href="https://github.com/luizolliver/vela-downloader/releases/latest"><b>Baixar para Windows</b></a>
   ·
   <a href="CHANGELOG.md">Novidades</a>
   ·
-  <a href="https://github.com/luizolliver/youtube-dl/issues">Relatar um problema</a>
+  <a href="https://github.com/luizolliver/vela-downloader/issues">Relatar um problema</a>
 </p>
 
 ![Tela inicial do Vela Downloader, com o campo para colar o link e o aviso de link copiado](docs/screenshots/1-colar-link.png)
@@ -42,7 +42,7 @@
 
 ## Instalação
 
-1. Baixe o arquivo `Vela-Downloader-Setup-<versão>.exe` na [página de releases](https://github.com/luizolliver/youtube-dl/releases/latest).
+1. Baixe o arquivo `Vela-Downloader-Setup-<versão>.exe` na [página de releases](https://github.com/luizolliver/vela-downloader/releases/latest).
 2. Abra o instalador e siga os passos.
 
 O instalador ainda não tem assinatura digital, então o Windows SmartScreen pode mostrar **"O Windows protegeu o computador"**. Para continuar, clique em **Mais informações** e depois em **Executar assim mesmo**. O instalador é gerado a partir deste repositório pelo [workflow de release](.github/workflows/release.yml).
@@ -68,6 +68,8 @@ Vídeos privados, com restrição de idade ou exclusivos para membros exigem log
 - **Navegador instalado:** o yt-dlp lê o login direto do navegador (`--cookies-from-browser`). No Windows, o Firefox é o mais confiável. As versões recentes do Chrome e do Edge protegem os cookies e geralmente não funcionam.
 
 Os logins ficam só no seu computador. **Configurações → Apagar logins** remove todos.
+
+Se o login ou outra função não funcionar, abra **Configurações → Sobre → Registro de diagnóstico** e anexe o arquivo `vela.log` ao [relatar o problema](https://github.com/luizolliver/vela-downloader/issues). Ele registra os passos do login, da atualização e os erros, sem senhas nem cookies.
 
 ## Para desenvolvedores
 

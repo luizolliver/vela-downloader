@@ -4,11 +4,12 @@ Obrigado pelo interesse no Vela Downloader. Correções, melhorias e relatos de 
 
 ## Relatar um problema
 
-Abra uma [issue](https://github.com/luizolliver/youtube-dl/issues/new/choose) com:
+Abra uma [issue](https://github.com/luizolliver/vela-downloader/issues/new/choose) com:
 
 - a versão do Vela (em **Configurações → Sobre**) e a do motor yt-dlp;
 - o link que falhou, se ele for público;
-- a mensagem de erro que apareceu.
+- a mensagem de erro que apareceu;
+- o arquivo `vela.log`, que fica em **Configurações → Sobre → Registro de diagnóstico → Mostrar arquivo**. Ele não contém senhas nem cookies.
 
 Antes, tente **Configurações → Motor de download → Verificar atualização**. Quando um site muda, a correção costuma chegar primeiro no yt-dlp.
 

@@ -19,6 +19,11 @@ body:
     attributes:
       label: Mensagem de erro
       description: Copie a mensagem que apareceu no Vela.
+  - type: textarea
+    id: log
+    attributes:
+      label: Registro de diagnóstico
+      description: "Anexe o arquivo vela.log (Configurações → Sobre → Registro de diagnóstico → Mostrar arquivo). Ele não contém senhas nem cookies."
   - type: input
     id: version
     attributes:

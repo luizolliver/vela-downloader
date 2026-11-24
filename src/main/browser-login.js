@@ -13,6 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { log } = require('./log');
 
 function candidates() {
   if (process.env.VELA_LOGIN_BROWSER) return [{ name: 'Navegador', path: process.env.VELA_LOGIN_BROWSER }];
@@ -157,18 +158,75 @@ function profileInUse(profileDir) {
   try { process.kill(pid, 0); return true; } catch (err) { return err.code === 'EPERM'; }
 }
 
-// Ask the browser to close normally, so it writes its cookies to disk.
-function closeGracefully(child) {
-  if (!child || child.exitCode !== null) return;
-  try {
-    if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T'], { windowsHide: true });
-    else process.kill(child.pid, 'SIGTERM');
-  } catch { /* already closed */ }
+// Runs a command and resolves when it ends; failures are ignored.
+function runQuiet(cmd, args) {
+  return new Promise(resolve => {
+    let child;
+    try { child = spawn(cmd, args, { windowsHide: true, stdio: 'ignore' }); } catch { resolve(); return; }
+    child.on('error', () => resolve());
+    child.on('exit', () => resolve());
+  });
+}
+
+// Windows: run a PowerShell snippet over every process whose command line
+// mentions Vela's login profile ($_ is a Win32_Process).
+function forEachProfileProcess(profileDir, action) {
+  const dir = profileDir.replace(/'/g, "''");
+  const script = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${dir}') } | ForEach-Object { ${action} }`;
+  return runQuiet('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]);
+}
+
+// Ask every browser process using the profile to close normally, so the
+// browser writes its cookies to disk.
+async function askToClose(child, profileDir) {
+  if (process.platform === 'win32') {
+    if (child && child.exitCode === null) await runQuiet('taskkill', ['/pid', String(child.pid), '/T']);
+    // Also reaches a browser that kept running after its window closed
+    await forEachProfileProcess(profileDir, '$p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; if ($p) { [void]$p.CloseMainWindow() }');
+  } else {
+    if (child && child.exitCode === null) { try { process.kill(child.pid, 'SIGTERM'); } catch { /* gone */ } }
+    await runQuiet('pkill', ['-TERM', '-f', '--', `--user-data-dir=${profileDir}`]);
+  }
+}
+
+// Last resort when the browser ignores the request to close.
+async function forceClose(child, profileDir) {
+  if (process.platform === 'win32') {
+    if (child && child.exitCode === null) await runQuiet('taskkill', ['/pid', String(child.pid), '/T', '/F']);
+    await forEachProfileProcess(profileDir, 'Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue');
+  } else {
+    if (child && child.exitCode === null) { try { process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ } }
+    await runQuiet('pkill', ['-KILL', '-f', '--', `--user-data-dir=${profileDir}`]);
+  }
+}
+
+async function waitUntilFree(profileDir, ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (!profileInUse(profileDir)) return true;
+    await sleep(300);
+  }
+  return !profileInUse(profileDir);
+}
+
+// Close the login browser: politely first, by force after 10 seconds.
+async function closeBrowser(child, profileDir) {
+  await askToClose(child, profileDir);
+  if (await waitUntilFree(profileDir, 10000)) return 'closed';
+  log('login', 'O navegador não fechou em 10 s; encerrando à força');
+  await forceClose(child, profileDir);
+  return (await waitUntilFree(profileDir, 5000)) ? 'forced' : 'still-running';
 }
 
 // Starts the profile invisibly with a local DevTools port, reads every
 // cookie, then shuts it down. No web page is loaded in this step.
 async function readCookies(browser, profileDir) {
+  // The profile must be free, or the headless browser would just hand over
+  // to the running one
+  if (profileInUse(profileDir) && !(await waitUntilFree(profileDir, 3000))) {
+    log('login', 'O perfil ainda estava em uso antes da leitura; fechando o navegador');
+    await closeBrowser(null, profileDir);
+  }
   try { fs.rmSync(path.join(profileDir, 'DevToolsActivePort'), { force: true }); } catch { /* ignore */ }
   const child = spawn(browser.path, [
     '--headless=new',
@@ -204,16 +262,21 @@ function run({ browser, profileDir, url, isDone, onPhase = () => {} }) {
   let child = null;
   let canceled = false;
   let finishRequested = false;
+  let wake = () => {};
+  const userActed = new Promise(r => { wake = r; });
 
   const promise = (async () => {
     fs.mkdirSync(profileDir, { recursive: true });
+    log('login', `Abrindo ${browser.name}: ${browser.path}`);
+
     // Close a login window left open by an earlier attempt
     if (profileInUse(profileDir)) {
+      log('login', 'O perfil de login já estava em uso; fechando a janela anterior');
       const leftover = readEndpoint(profileDir);
       if (leftover) {
         try { const c = await Cdp.connect(leftover, 1500); await c.send('Browser.close').catch(() => {}); c.close(); } catch { /* not reachable */ }
       }
-      for (let i = 0; i < 20 && profileInUse(profileDir); i++) await sleep(250);
+      if (!(await waitUntilFree(profileDir, 5000))) await closeBrowser(null, profileDir);
     }
 
     child = spawn(browser.path, [
@@ -223,26 +286,57 @@ function run({ browser, profileDir, url, isDone, onPhase = () => {} }) {
       '--new-window',
       url
     ], { stdio: 'ignore', windowsHide: false });
-    child.on('error', () => {});
-    const exited = new Promise(r => child.on('exit', r));
+    child.on('error', err => log('login', 'Falha ao abrir o navegador', err.message));
+    const launchedAt = Date.now();
+    const exited = new Promise(r => child.on('exit', code => { log('login', `Processo do navegador terminou (código ${code})`); r(); }));
     onPhase('login');
 
-    // Wait until the browser is gone (closed by the user, or by finish/cancel).
-    await exited;
-    while (profileInUse(profileDir) && !canceled) await sleep(500);
+    // Wait until the user closes the browser, or clicks "Concluir login" / "Cancelar"
+    await Promise.race([exited, userActed]);
+    if (!finishRequested && !canceled && Date.now() - launchedAt < 8000) {
+      // The process we started ended right away: the browser handed the window
+      // to another process. Give that one time to take the profile lock.
+      log('login', 'O processo iniciado terminou logo; aguardando a janela do navegador');
+      await Promise.race([sleep(4000), userActed]);
+    }
+    if (!finishRequested && !canceled) {
+      // The window was closed; the browser may still be shutting down, or
+      // keep running in the background. Wait for it, or for the user.
+      while (profileInUse(profileDir) && !finishRequested && !canceled) {
+        await Promise.race([sleep(500), userActed]);
+      }
+    }
+    if (finishRequested || canceled) {
+      onPhase('closing');
+      const how = await closeBrowser(child, profileDir);
+      log('login', `Navegador fechado: ${how}`);
+      if (how === 'still-running') {
+        return { ok: false, error: `Não foi possível fechar o ${browser.name}. Feche todas as janelas dele e tente de novo.` };
+      }
+    }
     if (canceled && !finishRequested) return { ok: true, connected: false, canceled: true };
 
     onPhase('reading');
     await sleep(500);
     const cookies = await readCookies(browser, profileDir);
-    return isDone(cookies) ? { ok: true, connected: true, cookies } : { ok: true, connected: false };
-  })();
+    const byDomain = {};
+    for (const c of cookies) {
+      const d = String(c.domain).replace(/^\./, '');
+      byDomain[d] = (byDomain[d] || 0) + 1;
+    }
+    const done = isDone(cookies);
+    log('login', `Cookies lidos do perfil: ${cookies.length} (login encontrado: ${done ? 'sim' : 'não'})`, byDomain);
+    return done ? { ok: true, connected: true, cookies } : { ok: true, connected: false, notFound: true };
+  })().catch(err => {
+    log('login', 'Erro no login pelo navegador', err.stack || err.message);
+    return { ok: false, error: `Não foi possível ler o login do ${browser.name}: ${err.message}.` };
+  });
 
   return {
     promise,
     // "Concluir login": close the browser and read what it saved
-    finish: () => { finishRequested = true; closeGracefully(child); },
-    cancel: () => { canceled = true; closeGracefully(child); }
+    finish: () => { finishRequested = true; wake(); },
+    cancel: () => { canceled = true; wake(); }
   };
 }
 
