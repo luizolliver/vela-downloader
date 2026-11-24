@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const auth = require('./auth');
+const { log } = require('./log');
 const { DownloadRun } = require('./ytdlp');
 const store = require('./settings');
 
@@ -171,6 +172,7 @@ class DownloadManager {
       job.speed = 0;
       job.error = result.error;
       job.needsLogin = !!result.needsLogin;
+      log('download', `Falhou: ${job.title} (${job.mode} ${job.format} ${job.qualityLabel})`, result.error);
       this.emit(job, true);
       this.onFinished(this.snapshot(job));
     }

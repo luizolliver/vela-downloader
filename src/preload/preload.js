@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('vela', {
   openExternal: url => ipcRenderer.invoke('shell:external', url),
   freeSpace: dir => ipcRenderer.invoke('fs:free', dir),
   sites: () => ipcRenderer.invoke('sites:list'),
+  openLog: () => ipcRenderer.invoke('app:openLog'),
 
   clipboard: {
     onUrl: on('clipboard:url'),

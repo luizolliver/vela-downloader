@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { app, BrowserWindow, session } = require('electron');
 const browserLogin = require('./browser-login');
+const { log } = require('./log');
 
 const PARTITION = 'persist:vela-login';
 
@@ -171,7 +172,16 @@ function loginWithBrowser(site, browser, onPhase) {
     activeLogin = null;
     if (r.ok && r.connected && r.cookies) {
       exportSite(site, r.cookies);
+      log('login', `Login do ${site.name} salvo em cookies.txt`);
       return { ok: true, connected: true, browser: browser.name };
+    }
+    if (r.notFound) {
+      return {
+        ok: false,
+        connected: isSignedIn(site),
+        error: `Não encontramos o login do ${site.name} no ${browser.name}. Entre na sua conta e só conclua depois que o ${site.name} abrir já com você conectado.`,
+        browser: browser.name
+      };
     }
     return { ok: r.ok, connected: r.ok ? isSignedIn(site) : false, error: r.error, browser: browser.name, canceled: r.canceled };
   }, err => {

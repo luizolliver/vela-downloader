@@ -9,6 +9,7 @@ const {
 const store = require('./settings');
 const engine = require('./ytdlp');
 const auth = require('./auth');
+const { log, logFile } = require('./log');
 const { DownloadManager } = require('./downloads');
 const { POPULAR, siteFor, isUrl } = require('./sites');
 
@@ -280,6 +281,8 @@ function registerIpc() {
   });
   ipcMain.handle('engine:version', () => engine.version(store.getSettings()));
   ipcMain.handle('engine:update', async () => {
+    // The running downloads use the binary that would be replaced
+    if (manager.hasActive()) return fail(new Error('Espere os downloads em andamento terminarem para atualizar o motor.'));
     try { return ok(await engine.update(store.getSettings())); } catch (err) { return fail(err); }
   });
 
@@ -383,6 +386,13 @@ function registerIpc() {
     } catch (err) { return fail(err); }
   });
 
+  ipcMain.handle('app:openLog', async () => {
+    const file = logFile();
+    if (!fs.existsSync(file)) log('app', 'Registro criado');
+    shell.showItemInFolder(file);
+    return ok(file);
+  });
+
   ipcMain.handle('sites:list', () => engine.listExtractors(store.getSettings()));
 
   ipcMain.handle('clipboard:ignore', (_e, url) => { if (typeof url === 'string') ignoredClips.add(url); });
@@ -395,6 +405,7 @@ function registerIpc() {
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(() => {
+  log('app', `Vela ${app.getVersion()} iniciado (${process.platform} ${process.arch}, Electron ${process.versions.electron}${app.isPackaged ? '' : ', desenvolvimento'})`);
   ensureDevShortcut();
   registerIpc();
   createWindow();
